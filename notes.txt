@@ -1,0 +1,43 @@
+Two ways we are exploring:
+
+**Method 1**. Inject a fork into a remote process, and then trace the forked process while the parent continues executing.
+
+Currently there exists my prototype fork injection code 
+
+https://github.in.backtrace.io/roneill/fork_injection/blob/master/inject.c
+
+which attaches to a remote-process, and injects some code into the base of the text segment which calls fork. It executes the fork-code, and once the fork-code has finished the tracer receives an ptrace-event-message telling us the new child process-ID, which is already attached to by `sys_ptrace` and ready to be traced. This theoretically allows for minimum pause-times on processes. The overhead incurred is primarily from stopping the process, waking it back up (to execute the fork), stopping it (when control is passed back to the tracer), and then waking the parent back up again, meanwhile the forked child is being traced. On my system this overhead seems to be pretty minimal, and may primarily be effected by how long it takes ptrace to stop/wake all process threads. Here are few examples of injecting a fork into some processes, the measurements are done in nanoseconds.
+
+```
+elfmaster@roneill:~/workspace/roneill/fork_injection$ ps auxw | grep cron | grep -v grep
+root       762  0.0  0.0  33128  3036 ?        Ss   09:09   0:00 /usr/sbin/cron -f
+elfmaster@roneill:~/workspace/roneill/fork_injection$ sudo ./inject `pidof cron`
+caught fork for child: 10461
+0 s, 313836 ns
+elfmaster@roneill:~/workspace/roneill/fork_injection$ ps auxw | grep cron | grep -v grep
+root       762  0.0  0.0  33128  3036 ?        Ss   09:09   0:00 /usr/sbin/cron -f
+root     10461  0.0  0.0  33128   316 ?        T    16:56   0:00 /usr/sbin/cron -f
+```
+
+Fork injection took ~313 ms on the cron daemon.
+
+Now on something more sophisticated and larger like firefox
+
+```
+root@roneill:~/workspace/roneill/fork_injection# ps auxw | grep firefox | grep -v grep
+elfmast+  4978 10.4 10.4 1871384 837844 ?      Sl   11:18  35:45 /usr/lib/firefox/firefox
+elfmast+  7770  0.0  0.4 333772 38356 ?        Sl   13:49   0:06 /usr/lib/firefox/plugin-container /opt/google/talkplugin/libnpgoogletalk.so -greomni /usr/lib/firefox/omni.ja -appomni /usr/lib/firefox/browser/omni.ja -appdir /usr/lib/firefox/browser 4978 true plugin
+root@roneill:~/workspace/roneill/fork_injection# ./inject `pidof firefox`
+caught fork for child: 10531
+0 s, 10616760 ns
+root@roneill:~/workspace/roneill/fork_injection# ps auxw | grep firefox | grep -v grep
+elfmast+  4978 10.4 10.5 1871512 847732 ?      Sl   11:18  35:52 /usr/lib/firefox/firefox
+elfmast+  7770  0.0  0.4 333772 38356 ?        Sl   13:49   0:06 /usr/lib/firefox/plugin-container /opt/google/talkplugin/libnpgoogletalk.so -greomni /usr/lib/firefox/omni.ja -appomni /usr/lib/firefox/browser/omni.ja -appdir /usr/lib/firefox/browser 4978 true plugin
+elfmast+ 10531  0.0  9.2 1871448 747688 ?      T    17:00   0:00 /usr/lib/firefox/firefox
+```
+Fork injection with firefox took ~10000 microseconds. Have not yet measured which aspect of this takes the longest, but I'm pretty sure it has to do with the fact that stopping the parent process also stops the 70 threads associated with it.
+
+**Method 2**. Use a BCD like model, and call fork() to create a child process. A pre-existing child is then notified to trace the new child process (its sibling). Another way to accomplish this would be to fork child-0, which forks child-1 to trace child-0. Although a double-fork child should be used so the parent doesn't have to reap the tracee. So child-0 is forked, which then forks child-1. child-0 exits and is cleaned up, child-1 is now reaped by init, and forks child-2 (tracer-pid) which traces child-1 (tracee-pid).
+
+
+

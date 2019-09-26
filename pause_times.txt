@@ -1,0 +1,3 @@
+Tracing parent (with no fork): average elapsed time- 0.001594 (and 0.001350)
+
+Tracing forked child: average elapsed time- 0.001736 (and 0.001457)

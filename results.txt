@@ -1,0 +1,14 @@
+(With forked tracing)
+./forktest -F -p 25 -s 2600 -i 5
+--[ 5 iteration. 25 page mutations
+--[ Seed: 2600
+
+average time: 0.002456
+
+(With no tracing)
+./forktest -N -p 25 -s 2600 -i 5
+--[5 iteration. 25 page mutations
+--[ Seed: 2600
+
+average time: 0.001896
+

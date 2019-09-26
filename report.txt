@@ -1,0 +1,145 @@
+
+**Pause times and fork injection analysis**
+
+**Remote fork injection**
+
+Remote fork injection is the act of injecting code into a remote process that spawns
+a child-process as a duplicate of the parent. This allows us to trace the child process
+while the parent continues executing, and hopefully reduces pause-times for non-fatal
+faults.
+
+A prototype library was developed that includes a function ```pid_t pid_attach(pid_t);``` for
+injecting a fork into a remote process, and then attaching to the child process created by
+the fork. https://github.in.backtrace.io/roneill/fork_injection/blob/master/inject.c
+
+We test the speed of this with the following code slice:
+
+```
+	clock_gettime(CLOCK_MONOTONIC_RAW, &tps);
+	if ((new_child = pid_attach(pid)) < 0) {
+		fprintf(stderr, "Failed to attach to %d\n", pid);
+		exit(EXIT_FAILURE);
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &tpe);
+```
+
+The function returns the pid of the forked child process, which is stopped, attached to, and awaiting
+`SYS_ptrace` requests.
+
+**Remote fork injection results**
+
+Notice that injecting fork into processes that are single threaded like cron is quicker
+than injecting a fork into a process that has many threads such as firefox which has 70+
+active threads. This is likely because the process and all of its threads must be stopped and
+restarted.
+
+**Measurement 1:**
+Injecting fork into `/usr/bin/cron`: 313 microseconds
+
+Tracing `/usr/bin/cron` with `ptrace` measuring from `init_trace` to `process_close`
+takes ~82000 microseconds
+
+**Measurement 2:**
+Injecting fork into `/usr/lib/firefox/firefox`: 10000 microseconds
+
+Tracing `/usr/lib/firefox/firefox` with `ptrace` measuring from `init_trace` to `process_close`
+takes between ~100000 and ~250000 microseconds.
+
+**Remote fork injection Initial Summary**
+
+The time it takes to inject a fork into the process and spawn a child process that we have tracing
+control over (with `SYS_ptrace`) is faster than the amount of time it takes our ptrace utility
+to trace/analyze the remote process. How much faster it is varies based on whether or not the process
+is a single-threaded program vs. a complex multi-threaded program containing many threads.
+
+`/usr/bin/cron`: pause-times are ~250x faster
+
+`/usr/lib/firefox/firefox`: pause-times are between 10 and 25 times faster
+
+**Remote fork injection considerations**
+
+After the fork injection creates a child-process we trace the child-process and allow the parent to
+continue executing, however the next component to consider is the performance penalties inflicted
+by COW semantics, especially when implementing this technique in processes that write to a large
+number of pages. The next set of measurements will begin to discuss what those penalties look like
+under various circumstances and will hopefully help to determine the performance-cost ratio.
+
+**Measuring process performance with forked tracing**
+
+A test program called ./forktest was developed to measure the performance of a process while it
+it has a forked-child process that is being traced. The design is similar to BCD; a tracing child-process
+is created that waits for a packet containing which process-ID it should trace with libbt. When
+`snapshot_me()` is called, the `fork()` function is used to spawn a child process that waits to be traced.
+`snapshot_me()` does not wait for the child process to exit, and therefore the parent process goes
+on to execute its workload. This program also has several other modes including one that performs no
+forks or tracing, so that we can compare the performance of the process without the page-copies
+taking place imposed by COW. The tests are broken up into two tests:
+
+**test1()**
+
+This test essentially calls `snapshot_me` and then goes straight into mutating N randomly selected
+pages. The time it takes to access the first byte of each page is measured and stored so that we can
+get the individual delta for each page-access, as well as the total sum elapsed time. If a context
+switch happens between our delta timing, then we discard those deltas so that we don't get inaccurate
+results. This information allows us to see:
+
+1. How many pages we've managed to touch/mutate by the time the child-process is done being traced.
+2. How long it takes to mutate each page, and how the measurements change over-time.
+3. A histogram of bucketed measurements of page accesses ranging between 0 and N microseconds.
+4. A complete sum of the elapsed time it took to write to N random pages.
+
+**results of test1()**
+
+A more complete description of these results can be seen https://github.in.backtrace.io/backtrace/libbt/issues/235
+
+**With forked tracing**
+
+When accessing 100000 pages the average time is:
+
+On a program that is not being traced at all
+0.004314
+
+On a program that has a forked child being traced:
+0.126880
+
+The average tracing time of the forked-child process takes:
+0.002067, at which time the parent process has mutated
+about 5 pages.
+
+**More on forked tracing process performance**
+
+Initially each page mutation takes between 0.000003 and 0.000350 to complete.
+
+Somewhere between the 100th and 750th page mutation, the time for accessing
+each page goes down to sub-microseconds (several nanoseconds). And the remaining
+999000 page accesses take only another 0.020628. This means that ~84% of the
+overhead for page mutations happens during the first 100 to 750 page mutations (~1% of page mutations)
+and the remaining 999000 page mutations (99% of page mutations) are not effected
+negatively.
+
+Here is a histogram showing the measurements of page mutations in nanoseconds
+http://www.bitlackeys.org/images/cow_page_mutations.png
+
+**More on process performance with no tracing**
+
+When no tracing is involved we see that the total elapsed time is a fraction of the time taken when
+forked-tracing is present. We also see that the time it takes for each page mutation is steady across
+each page-touch and is just several nanoseconds (between ~10 and ~20).
+
+
+**test2()**
+
+test2() essentially copies bytes into each byte of N pages, whereas test1() just touched the first byte
+of each page. Since we are getting a delta of the entire memcpy vs. how how long it takes to modify a
+single page, we cannot see how the behavior changes over the course of time like with test1(). We can
+see that the overall performance is on average slightly degraded when the forked-trace is in effect
+by looking at these two box-plots, one for each scenario.
+
+Forked-tracing:
+http://www.bitlackeys.org/images/boxplot_trace.png
+
+No-tracing:
+http://www.bitlackeys.org/images/boxplot_notrace.png
+
+
+
